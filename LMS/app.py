@@ -6,10 +6,13 @@
 # static, templates 폴더 필수 (프론트용 파일 모이는 곳)
 # static : 정적 파일을 모아 놓음 (html, css, js)
 # templates : 동적 파일을 모아 놓음 (crud화면, 레이아웃, index 등....)
-from flask import Flask, render_template, request, redirect, url_for, session
+import os
+
+from flask import Flask, render_template, request, redirect, url_for, session, send_from_directory
 
 from LMS.common import Session
 from LMS.domain import *
+from LMS.service import PostService
 
 #                플라스크     프론트연결     요청,응답   주소전달   주소생성  상태저장
 
@@ -543,6 +546,152 @@ def score_my():
 
 
 ################################## 성적 CRUD END ########################################################################
+
+################################## 파일 게시판 CRUD ######################################################################
+
+# 파일 처리용 게시판의 특징
+# 1. 파일 업로드/다운로드가 가능!!!
+# 2. 단일파일/다중파일 업로드 처리
+# 3. 서비스 패키지를 활용
+## 4. /upload라는 폴더를 사용하겠다. / 용량제한 16MB
+# 5. 파일명 중복 방지용 코드 활용
+# 6. db에서 부모객체가 삭제되면 자식 객체를 삭제 되게 cascade 처리함!
+
+UPLOAD_FOLDER = 'uploads/'
+# 폴더가 없으면 자동 생성
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+    # 폴더 생성용 코드 os.makedirs(이름)
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+# 최대 업로드 용량 제한 (예: 16MB)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+# bit -> 0,1
+# 1byte -> 8bit -> 0~255 (256개)
+# 1KB -> 1024byte
+# 1MB -> 1024Kbyte
+# 1GB -> 1024Mbyte
+# 1TB -> 1024Gbyte
+# 1PB -> 1024Tbyte
+# 1XB -> 1024Pbyte
+
+
+
+@app.route('/filesboard/write', methods=['GET', 'POST'])
+def filesboard_write():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        title = request.form.get('title')
+        content = request.form.get('content')
+        # 핵심 : getlist를 사용해야 리스트 형태로 가져옵니다.
+        files = request.files.getlist('files')
+        # 파일 처리시 html 필수 코드 > enctype = "multipart/form-data"
+
+        if PostService.save_post(session['user_id'],title,content,files):
+            return "<script>alert('게시글이 등록되었습니다.'); location.href='/filesboard'; </script>"
+
+        else:
+            return "<script>alert('등록 실패'); history.back(); </script>"
+
+    return render_template('filesboard_write.html')
+
+
+
+# 파일 게시판 목록
+@app.route('/filesboard')
+def filesboard_list():
+    posts = PostService.get_posts()
+    return render_template('filesboard_list.html', posts=posts)
+
+
+
+
+# 파일 게시판 상세 보기
+@app.route('/filesboard/view/<int:post_id>')
+def filesboard_view(post_id):
+    post, files = PostService.get_post_detail(post_id)
+    if not post:
+        return "<script>alert('해당 게시글이 없습니다.'); location.href='/filesboard';</script>"
+    return render_template('filesboard_view.html', post=post, files=files)
+
+
+
+# send_from_directory 사용하여 자료 다운로드 가능
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    # 파일이 저장된 폴더(uploads)에서 파일을 찾아 전송합니다.
+    # 프론트 <a href="{{ url_for('download_file', filename=file.save_name) }}" ...> 이부분 처리용
+    # filename은 서버에 저장된 save_name입니다.
+    # 브라우저가 다운로드할 때 보여줄 원본 이름을 쿼리 스트링으로 받거나 DB에서 가져와야 합니다.
+    origin_name = request.args.get('origin_name')
+    return send_from_directory('uploads/', filename, as_attachment=True, download_name=origin_name)
+    # from flask import send_from_directory 필수
+
+    #   return send_from_directory('uploads/', filename)는 브라우져에서 바로 열어버림
+    #   as_attachment=True 로 하면 파일 다운로드 창을 띄움
+    #   저장할 파일명은 download_name=origin_name 로 지정
+
+
+
+
+@app.route('/filesboard/delete/<int:post_id>')
+def filesboard_delete(post_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    # 삭제 전 작성자 확인을 위해 정보 조회
+    post, _ = PostService.get_post_detail(post_id)
+    # _은 리턴값을 사용하지 않겠다 라는 관례적인 표현 (_) 사용하지 않는 변수
+
+    if not post:
+        return "<script>alert('이미 삭제된 게시글입니다.'); location.href='/filesboard';</script>"
+
+    # 본인 확인 (또는 관리자 권한)
+    if post['member_id'] != session['user_id'] and session.get('user_role') != 'admin':
+        return "<script>alert('삭제 권한이 없습니다.'); history.back();</script>"
+
+    if PostService.delete_post(post_id):
+        return "<script>alert('성공적으로 삭제되었습니다.'); location.href='/filesboard';</script>"
+    else:
+        return "<script>alert('삭제 중 오류가 발생했습니다.'); history.back();</script>"
+
+
+
+
+
+# 다중파일 수정용
+@app.route('/filesboard/edit/<int:post_id>', methods=['GET', 'POST'])
+def filesboard_edit(post_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        title = request.form.get('title')
+        content = request.form.get('content')
+        files = request.files.getlist('files')  # 다중 파일 가져오기
+
+        if PostService.update_post(post_id, title, content, files):
+            return f"<script>alert('수정되었습니다.'); location.href='/filesboard/view/{post_id}';</script>"
+        return "<script>alert('수정 실패'); history.back();</script>"
+
+    # GET 요청 시 기존 데이터 로드
+    post, files = PostService.get_post_detail(post_id)
+    if post['member_id'] != session['user_id']:
+        return "<script>alert('권한이 없습니다.'); history.back();</script>"
+
+    return render_template('filesboard_edit.html', post=post, files=files)
+
+
+
+
+
+
+
+
+################################## 파일 upload 게시판 END ################################################################
+
 @app.route("/") # url 생성용 코드 http://localhost:5000/ or 내 ip:5000
 def index():
     return render_template('main.html')
